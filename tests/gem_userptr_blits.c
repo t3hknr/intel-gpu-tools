@@ -572,6 +572,66 @@ static void test_forked_access(int fd)
 	free(ptr2);
 }
 
+#define MAP_FIXED_INVALIDATE_OVERLAP	(1<<0)
+#define MAP_FIXED_INVALIDATE_BUSY	(1<<1)
+#define MAP_FIXED_INVALIDATE_GET_PAGES	(1<<2)
+#define ALL_MAP_FIXED_INVALIDATE (MAP_FIXED_INVALIDATE_OVERLAP | \
+				  MAP_FIXED_INVALIDATE_BUSY | \
+				  MAP_FIXED_INVALIDATE_GET_PAGES)
+
+static int test_map_fixed_invalidate(int fd, uint32_t flags)
+{
+	void *ptr;
+	size_t ptr_size = sizeof(linear);
+	void *map;
+	int i;
+	int num_handles = (flags & MAP_FIXED_INVALIDATE_OVERLAP) ? 2 : 1;
+	uint32_t handle[num_handles];
+	uint32_t mmap_handle;
+	struct drm_i915_gem_mmap_gtt mmap_arg;
+	struct drm_i915_gem_set_domain set_domain;
+
+	ptr = mmap(NULL, ptr_size, PROT_READ | PROT_WRITE, MAP_SHARED |
+		   MAP_ANONYMOUS, -1, 0);
+	igt_assert(ptr != MAP_FAILED);
+
+	for (i=0; i<num_handles; i++)
+		handle[i] = create_userptr(fd, 0, ptr);
+	mmap_handle = gem_create(fd, PAGE_SIZE);
+
+	if (flags & MAP_FIXED_INVALIDATE_BUSY)
+		copy(fd, handle[0], handle[num_handles-1], 0);
+
+	//Map regular buffer in userptr range, triggering invalidate
+	memset(&mmap_arg, 0, sizeof(mmap_arg));
+	mmap_arg.handle = mmap_handle;
+	do_ioctl(fd, DRM_IOCTL_I915_GEM_MMAP_GTT, &mmap_arg);
+	map = mmap(ptr, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
+		   fd, mmap_arg.offset);
+	igt_assert(map != MAP_FAILED);
+
+	//Make sure the obj is fault_mappable
+	*(uint32_t*)map = 0xdead;
+
+	//Trigger get_pages on stale userptr
+	if (flags & MAP_FIXED_INVALIDATE_GET_PAGES) {
+		memset(&set_domain, 0, sizeof(set_domain));
+		set_domain.handle = handle[0];
+		set_domain.read_domains = I915_GEM_DOMAIN_GTT;
+		set_domain.write_domain = I915_GEM_DOMAIN_GTT;
+		drmIoctl(fd, DRM_IOCTL_I915_GEM_SET_DOMAIN, &set_domain);
+	}
+
+	gem_set_tiling(fd, mmap_handle, 2, 512 * 4);
+
+	munmap(ptr, ptr_size);
+	for (i=0; i<num_handles; i++)
+		gem_close(fd, handle[i]);
+	gem_close(fd, mmap_handle);
+
+	return 0;
+}
+
 static int test_forbidden_ops(int fd)
 {
 	struct drm_i915_gem_pread gem_pread;
@@ -1461,6 +1521,15 @@ int main(int argc, char **argv)
 
 		igt_subtest("stress-mm-invalidate-close-overlap")
 			test_invalidate_close_race(fd, true);
+
+		for (unsigned flags = 0; flags < ALL_MAP_FIXED_INVALIDATE + 1; flags++) {
+			igt_subtest_f("map-fixed-invalidate%s%s%s",
+				      flags & MAP_FIXED_INVALIDATE_OVERLAP ? "-overlap" : "",
+				      flags & MAP_FIXED_INVALIDATE_BUSY ? "-busy" : "",
+				      flags & MAP_FIXED_INVALIDATE_GET_PAGES ? "-gup" : "") {
+				test_map_fixed_invalidate(fd, flags);
+			}
+		}
 
 		igt_subtest("coherency-sync")
 			test_coherency(fd, count);
