@@ -2593,6 +2593,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define MI_BATCH_NON_SECURE_I965	(1 << 8)
 #define MI_BATCH_NON_SECURE_HSW		(1<<13) /* Additional bit for RCS */
 
+/* Arbitration */
+#define MI_ARB_CHECK		(0x05 << 23)
+
 #define MAX_DISPLAY_PIPES	2
 
 typedef enum {

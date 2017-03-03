@@ -114,8 +114,10 @@ static void emit_recursive_batch(igt_spin_t *spin,
 
 	/* recurse */
 	fill_reloc(&relocs[obj[BATCH].relocation_count],
-		   obj[BATCH].handle, 1, I915_GEM_DOMAIN_COMMAND, 0);
+		   obj[BATCH].handle, 3, I915_GEM_DOMAIN_COMMAND, 0);
 	if (gen >= 8) {
+		*batch++ = MI_ARB_CHECK;
+		*batch++ = MI_NOOP;
 		*batch++ = MI_BATCH_BUFFER_START | 1 << 8 | 1;
 		*batch++ = 0;
 		*batch++ = 0;
