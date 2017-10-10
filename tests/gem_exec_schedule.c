@@ -34,36 +34,16 @@
 #include "igt_sysfs.h"
 #include "i915/gem_scheduler.h"
 
-#define LOCAL_CONTEXT_PARAM_PRIORITY 6
-
 #define LO 0
 #define HI 1
 #define NOISE 2
 
-#define MAX_PRIO 1023
-#define MIN_PRIO -1023
+#define MAX_PRIO LOCAL_I915_CONTEXT_MAX_USER_PRIORITY
+#define MIN_PRIO LOCAL_I915_CONTEXT_MIN_USER_PRIORITY
 
 #define BUSY_QLEN 8
 
 IGT_TEST_DESCRIPTION("Check that we can control the order of execution");
-
-static int __ctx_set_priority(int fd, uint32_t ctx, int prio)
-{
-	struct local_i915_gem_context_param param;
-
-	memset(&param, 0, sizeof(param));
-	param.context = ctx;
-	param.size = 0;
-	param.param = LOCAL_CONTEXT_PARAM_PRIORITY;
-	param.value = prio;
-
-	return __gem_context_set_param(fd, &param);
-}
-
-static void ctx_set_priority(int fd, uint32_t ctx, int prio)
-{
-	igt_assert_eq(__ctx_set_priority(fd, ctx, prio), 0);
-}
 
 static void store_dword(int fd, uint32_t ctx, unsigned ring,
 			uint32_t target, uint32_t offset, uint32_t value,
@@ -157,7 +137,7 @@ static uint32_t create_highest_priority(int fd)
 	 * priority (and therefore the max user priority), so no context
 	 * can overtake us, and we effectively can form a plug.
 	 */
-	__ctx_set_priority(fd, ctx, MAX_PRIO);
+	__gem_context_set_priority(fd, ctx, MAX_PRIO);
 
 	return ctx;
 }
@@ -246,7 +226,7 @@ static void smoketest(int fd, unsigned ring, unsigned timeout)
 			int prio;
 
 			prio = hars_petruska_f54_1_random_unsafe_max(MAX_PRIO - MIN_PRIO) + MIN_PRIO;
-			ctx_set_priority(fd, ctx, prio);
+			gem_context_set_priority(fd, ctx, prio);
 
 			engine = engines[hars_petruska_f54_1_random_unsafe_max(nengine)];
 			store_dword(fd, ctx, engine, scratch,
@@ -288,10 +268,10 @@ static void reorder(int fd, unsigned ring, unsigned flags)
 	uint32_t ctx[2];
 
 	ctx[LO] = gem_context_create(fd);
-	ctx_set_priority(fd, ctx[LO], MIN_PRIO);
+	gem_context_set_priority(fd, ctx[LO], MIN_PRIO);
 
 	ctx[HI] = gem_context_create(fd);
-	ctx_set_priority(fd, ctx[HI], flags & EQUAL ? MIN_PRIO : 0);
+	gem_context_set_priority(fd, ctx[HI], flags & EQUAL ? MIN_PRIO : 0);
 
 	scratch = gem_create(fd, 4096);
 	plug(fd, &cork);
@@ -327,13 +307,13 @@ static void promotion(int fd, unsigned ring)
 	uint32_t ctx[3];
 
 	ctx[LO] = gem_context_create(fd);
-	ctx_set_priority(fd, ctx[LO], MIN_PRIO);
+	gem_context_set_priority(fd, ctx[LO], MIN_PRIO);
 
 	ctx[HI] = gem_context_create(fd);
-	ctx_set_priority(fd, ctx[HI], 0);
+	gem_context_set_priority(fd, ctx[HI], 0);
 
 	ctx[NOISE] = gem_context_create(fd);
-	ctx_set_priority(fd, ctx[NOISE], MIN_PRIO/2);
+	gem_context_set_priority(fd, ctx[NOISE], MIN_PRIO/2);
 
 	result = gem_create(fd, 4096);
 	dep = gem_create(fd, 4096);
@@ -386,16 +366,16 @@ static void preempt(int fd, unsigned ring, unsigned flags)
 	uint32_t ctx[2];
 
 	ctx[LO] = gem_context_create(fd);
-	ctx_set_priority(fd, ctx[LO], MIN_PRIO);
+	gem_context_set_priority(fd, ctx[LO], MIN_PRIO);
 
 	ctx[HI] = gem_context_create(fd);
-	ctx_set_priority(fd, ctx[HI], MAX_PRIO);
+	gem_context_set_priority(fd, ctx[HI], MAX_PRIO);
 
 	for (int n = 0; n < 16; n++) {
 		if (flags & NEW_CTX) {
 			gem_context_destroy(fd, ctx[LO]);
 			ctx[LO] = gem_context_create(fd);
-			ctx_set_priority(fd, ctx[LO], MIN_PRIO);
+			gem_context_set_priority(fd, ctx[LO], MIN_PRIO);
 		}
 		spin[n] = __igt_spin_batch_new(fd, ctx[LO], ring, 0);
 		igt_debug("spin[%d].handle=%d\n", n, spin[n]->handle);
@@ -437,12 +417,12 @@ static void preempt_other(int fd, unsigned ring)
 	 */
 
 	ctx[LO] = gem_context_create(fd);
-	ctx_set_priority(fd, ctx[LO], MIN_PRIO);
+	gem_context_set_priority(fd, ctx[LO], MIN_PRIO);
 
 	ctx[NOISE] = gem_context_create(fd);
 
 	ctx[HI] = gem_context_create(fd);
-	ctx_set_priority(fd, ctx[HI], MAX_PRIO);
+	gem_context_set_priority(fd, ctx[HI], MAX_PRIO);
 
 	n = 0;
 	for_each_engine(fd, other) {
@@ -497,7 +477,7 @@ static void preempt_self(int fd, unsigned ring)
 	ctx[HI] = gem_context_create(fd);
 
 	n = 0;
-	ctx_set_priority(fd, ctx[HI], MIN_PRIO);
+	gem_context_set_priority(fd, ctx[HI], MIN_PRIO);
 	for_each_engine(fd, other) {
 		spin[n] = __igt_spin_batch_new(fd, ctx[NOISE], other, 0);
 		store_dword(fd, ctx[HI], other,
@@ -505,7 +485,7 @@ static void preempt_self(int fd, unsigned ring)
 			    0, I915_GEM_DOMAIN_RENDER);
 		n++;
 	}
-	ctx_set_priority(fd, ctx[HI], MAX_PRIO);
+	gem_context_set_priority(fd, ctx[HI], MAX_PRIO);
 	store_dword(fd, ctx[HI], ring,
 		    result, (n + 1)*sizeof(uint32_t), n + 1,
 		    0, I915_GEM_DOMAIN_RENDER);
@@ -543,7 +523,7 @@ static void deep(int fd, unsigned ring)
 	ctx = malloc(sizeof(*ctx) * nctx);
 	for (int n = 0; n < nctx; n++) {
 		ctx[n] = gem_context_create(fd);
-		ctx_set_priority(fd, ctx[n], MAX_PRIO - nctx + n);
+		gem_context_set_priority(fd, ctx[n], MAX_PRIO - nctx + n);
 	}
 
 	result = gem_create(fd, size);
@@ -785,7 +765,7 @@ static void reorder_wide(int fd, unsigned ring)
 		uint32_t *batch;
 
 		execbuf.rsvd1 = gem_context_create(fd);
-		ctx_set_priority(fd, execbuf.rsvd1, n);
+		gem_context_set_priority(fd, execbuf.rsvd1, n);
 
 		obj[2].handle = gem_create(fd, sz);
 		batch = gem_mmap__gtt(fd, obj[2].handle, sz, PROT_WRITE);
@@ -879,7 +859,7 @@ static void test_pi_ringfull(int fd, unsigned int engine)
 	execbuf.buffer_count = 1;
 	execbuf.flags = engine;
 	execbuf.rsvd1 = gem_context_create(fd);
-	ctx_set_priority(fd, execbuf.rsvd1, MIN_PRIO);
+	gem_context_set_priority(fd, execbuf.rsvd1, MIN_PRIO);
 
 	gem_execbuf(fd, &execbuf);
 	gem_sync(fd, obj[1].handle);
@@ -927,7 +907,7 @@ static void test_pi_ringfull(int fd, unsigned int engine)
 
 		igt_debug("Creating HP context\n");
 		execbuf.rsvd1 = gem_context_create(fd);
-		ctx_set_priority(fd, execbuf.rsvd1, MAX_PRIO);
+		gem_context_set_priority(fd, execbuf.rsvd1, MAX_PRIO);
 
 		kill(getppid(), SIGALRM);
 		sched_yield();

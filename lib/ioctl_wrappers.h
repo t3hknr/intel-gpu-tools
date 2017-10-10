@@ -187,6 +187,12 @@ void gem_require_ring(int fd, unsigned ring);
 bool gem_has_mocs_registers(int fd);
 void gem_require_mocs_registers(int fd);
 
+#define LOCAL_I915_CONTEXT_MAX_USER_PRIORITY	1023
+#define LOCAL_I915_CONTEXT_DEFAULT_PRIORITY	0
+#define LOCAL_I915_CONTEXT_MIN_USER_PRIORITY	-1023
+int __gem_context_set_priority(int fd, uint32_t ctx, int prio);
+void gem_context_set_priority(int fd, uint32_t ctx, int prio);
+
 /* prime */
 struct local_dma_buf_sync {
 	uint64_t flags;
