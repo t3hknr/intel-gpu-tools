@@ -63,6 +63,7 @@
 #include "igt_kms.h"
 #include "igt_stats.h"
 #include "igt_sysfs.h"
+#include "i915/gem_scheduler.h"
 
 #ifdef HAVE_LIBGEN_H
 #include <libgen.h>   /* for dirname() */
@@ -1471,6 +1472,20 @@ void igt_show_submission_method(int fd)
 
 	igt_info("Using Legacy submission%s\n",
 		 flags & GEM_SUBMISSION_SEMAPHORES ? ", with semaphores" : "");
+}
+
+void igt_show_scheduler_capability(int fd)
+{
+	unsigned caps = gem_scheduler_capability(fd);
+
+	if (!caps)
+		return;
+
+	igt_info("Has kernel scheduler\n");
+	if (caps & LOCAL_I915_SCHEDULER_CAP_PRIORITY)
+		igt_info(" - With priority sorting\n");
+	if (caps & LOCAL_I915_SCHEDULER_CAP_PREEMPTION)
+		igt_info(" - With preemption enabled\n");
 }
 
 static void

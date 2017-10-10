@@ -279,6 +279,7 @@ void igt_unlock_mem(void);
 })
 
 void igt_show_submission_method(int fd);
+void igt_show_scheduler_capability(int fd);
 
 struct igt_mean;
 void igt_start_siglatency(int sig); /* 0 => SIGRTMIN (default) */
