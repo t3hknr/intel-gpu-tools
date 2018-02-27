@@ -62,7 +62,6 @@
 
 char *read_buffer;
 char *out_filename;
-int poll_timeout = 2; /* by default 2ms timeout */
 pthread_mutex_t mutex;
 pthread_t flush_thread;
 int verbosity_level = 3; /* by default capture logs at max verbosity */
@@ -352,12 +351,6 @@ static int parse_options(int opt, int opt_index, void *data)
 		igt_assert_f(test_duration > 0, "invalid input for -t option\n");
 		igt_debug("logger to run for %d second\n", test_duration);
 		break;
-	case 'p':
-		poll_timeout = atoi(optarg);
-		igt_assert_f(poll_timeout != 0, "invalid input for -p option\n");
-		if (poll_timeout > 0)
-			igt_debug("polling to be done with %d millisecond timeout\n", poll_timeout);
-		break;
 	case 's':
 		max_filesize = atoi(optarg);
 		igt_assert_f(max_filesize > 0, "invalid input for -s option\n");
@@ -379,7 +372,6 @@ static void process_command_line(int argc, char **argv)
 		{"outputfile", required_argument, 0, 'o'},
 		{"buffers", required_argument, 0, 'b'},
 		{"testduration", required_argument, 0, 't'},
-		{"polltimeout", required_argument, 0, 'p'},
 		{"size", required_argument, 0, 's'},
 		{"discard", no_argument, 0, 'd'},
 		{ 0, 0, 0, 0 }
@@ -390,11 +382,10 @@ static void process_command_line(int argc, char **argv)
 		"  -o --outputfile=name   name of the output file, including the location, where logs will be stored\n"
 		"  -b --buffers=num       number of buffers to be maintained on logger side for storing logs\n"
 		"  -t --testduration=sec  max duration in seconds for which the logger should run\n"
-		"  -p --polltimeout=ms    polling timeout in ms, -1 == indefinite wait for the new data\n"
 		"  -s --size=MB           max size of output file in MBs after which logging will be stopped\n"
 		"  -d --discard           discard the old/boot-time logs before entering into the capture loop\n";
 
-	igt_simple_init_parse_opts(&argc, argv, "v:o:b:t:p:s:d", long_options,
+	igt_simple_init_parse_opts(&argc, argv, "v:o:b:t:s:d", long_options,
 				   help, parse_options, NULL);
 }
 
@@ -427,27 +418,12 @@ int main(int argc, char **argv)
 	alarm(test_duration); /* Start the alarm */
 
 	do {
-		/* Wait/poll for the new data to be available, relay doesn't
-		 * provide a blocking read.
-		 * On older kernels need to do polling with a timeout instead of
-		 * indefinite wait to avoid relying on relay for the wakeup, as
-		 * relay used to do the wakeup in a deferred manner on jiffies
-		 * granularity by scheduling a timer and moreover that timer was
-		 * re-scheduled on every newly produced buffer and so was pushed
-		 * out if there were multiple flush interrupts in a very quick
-		 * succession (less than a jiffy gap between 2 flush interrupts)
-		 * causing relay to run out of sub buffers to store new logs.
-		 */
-		ret = poll(&relay_poll_fd, nfds, poll_timeout);
+		ret = poll(&relay_poll_fd, nfds, -1);
 		if (ret < 0) {
 			if (errno == EINTR)
 				break;
 			igt_assert_f(0, "poll call failed\n");
 		}
-
-		/* No data available yet, poll again, hopefully new data is round the corner */
-		if (!relay_poll_fd.revents)
-			continue;
 
 		pull_data();
 	} while (!stop_logging);
