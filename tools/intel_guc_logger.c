@@ -60,6 +60,8 @@
 #define DEFAULT_OUTPUT_FILE_NAME  "guc_log_dump.dat"
 #define CONTROL_FILE_NAME "i915_guc_log_relay"
 #define LOG_LEVEL_FILE_NAME "i915_guc_log_level"
+#define GUC_LOG_LEVEL_MIN 0
+#define GUC_LOG_LEVEL_MAX 5
 
 bool stop_logging;
 
@@ -304,7 +306,8 @@ process_command_line(int argc, char **argv, struct guc_logger_options *opts)
 		switch (c) {
 		case 'v':
 			opts->verbosity = atoi(optarg);
-			if (opts->verbosity < 0 || opts->verbosity > 4) {
+			if (opts->verbosity < GUC_LOG_LEVEL_MIN ||
+			    opts->verbosity > GUC_LOG_LEVEL_MAX) {
 				fprintf(stderr, "invalid input for -v option\n");
 				goto out;
 			}
