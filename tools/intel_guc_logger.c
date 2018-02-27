@@ -56,9 +56,10 @@
  */
 #define NUM_SUBBUFS 100
 
-#define LOG_FILE_NAME  "guc_log"
+#define LOG_FILE_NAME  "guc_log0"
 #define DEFAULT_OUTPUT_FILE_NAME  "guc_log_dump.dat"
-#define CONTROL_FILE_NAME "i915_guc_log_control"
+#define CONTROL_FILE_NAME "i915_guc_log_relay"
+#define LOG_LEVEL_FILE_NAME "i915_guc_log_level"
 
 bool stop_logging;
 
@@ -79,22 +80,22 @@ struct guc_logger_thread_data {
 	pthread_cond_t overflow_cond;
 };
 
-static void guc_log_control(uint64_t verbosity)
+static void guc_log_level(uint64_t verbosity)
 {
-	int control_fd;
+	int log_level_fd;
 	char data[3];
 	int ret;
 
-	control_fd = igt_debugfs_open(-1, CONTROL_FILE_NAME, O_WRONLY);
-	assert(control_fd >= 0);
+	log_level_fd = igt_debugfs_open(-1, LOG_LEVEL_FILE_NAME, O_WRONLY);
+	assert(log_level_fd >= 0);
 
 	ret = snprintf(data, sizeof(data), "%lu", verbosity);
 	assert(ret > 0);
 
-	ret = write(control_fd, data, ret);
+	ret = write(log_level_fd, data, ret);
 	assert(ret > 0);
 
-	close(control_fd);
+	close(log_level_fd);
 }
 
 static void int_sig_handler(int sig)
@@ -361,14 +362,13 @@ int main(int argc, char **argv)
 	struct pollfd log_poll_fd;
 	pthread_t flush_thread;
 	int nfds;
-	int log_fd;
+	int log_fd, control_fd;
 	int ret;
 
 	process_command_line(argc, argv, &opts);
 
-	/* Use full verbosity by default */
-	if (opts.verbosity == -1)
-		opts.verbosity = 4;
+	if (opts.verbosity != -1)
+		guc_log_level(opts.verbosity);
 
 	out_fd = open(opts.out_filename ? : DEFAULT_OUTPUT_FILE_NAME,
 		      O_CREAT | O_WRONLY | O_TRUNC | O_DIRECT, 0440);
@@ -402,7 +402,9 @@ int main(int argc, char **argv)
 	init_flusher_thread(&flush_thread, &data);
 	init_main_thread();
 
-	guc_log_control(opts.verbosity);
+	control_fd = igt_debugfs_open(-1, CONTROL_FILE_NAME, O_RDWR);
+	assert(control_fd >= 0);
+
 	log_fd = igt_debugfs_open(-1, LOG_FILE_NAME, O_RDONLY);
 	assert(log_fd >= 0);
 
@@ -428,15 +430,15 @@ int main(int argc, char **argv)
 		}
 	} while (!stop_logging);
 
-	/* Pause logging on the GuC side */
-	guc_log_control(0);
-
 	pthread_cond_signal(&data.underflow_cond);
 	pthread_join(flush_thread, NULL);
+
+	write(control_fd, "", 1);
 
 	total_bytes += pull_leftover_data(&data, log_fd);
 	igt_info("total bytes written %lu\n", total_bytes);
 
 	close(log_fd);
+	close(control_fd);
 	close(out_fd);
 }
