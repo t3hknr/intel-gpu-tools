@@ -56,49 +56,43 @@
  */
 #define NUM_SUBBUFS 100
 
-#define RELAY_FILE_NAME  "guc_log"
+#define LOG_FILE_NAME  "guc_log"
 #define DEFAULT_OUTPUT_FILE_NAME  "guc_log_dump.dat"
 #define CONTROL_FILE_NAME "i915_guc_log_control"
 
-char *read_buffer;
-char *out_filename;
-pthread_mutex_t mutex;
-pthread_t flush_thread;
-int verbosity_level = 3; /* by default capture logs at max verbosity */
-uint32_t produced, consumed;
-uint64_t total_bytes_written;
-int relay_fd, outfile_fd = -1;
-uint32_t test_duration, max_filesize;
-pthread_cond_t underflow_cond, overflow_cond;
-bool stop_logging, capturing_stopped;
+bool stop_logging;
 
-static void guc_log_control(bool enable, uint32_t log_level)
+struct guc_logger_options {
+	int verbosity;
+	unsigned test_duration;
+	ssize_t max_filesize;
+	char *out_filename;
+};
+
+struct guc_logger_thread_data {
+	int out_fd;
+	void *buffer;
+	uint32_t produced;
+	uint32_t consumed;
+	pthread_mutex_t mutex;
+	pthread_cond_t underflow_cond;
+	pthread_cond_t overflow_cond;
+};
+
+static void guc_log_control(uint64_t verbosity)
 {
 	int control_fd;
-	char data[19];
-	uint64_t val;
+	char data[3];
 	int ret;
 
-	igt_assert_lte(log_level, 3);
-
 	control_fd = igt_debugfs_open(-1, CONTROL_FILE_NAME, O_WRONLY);
-	igt_assert_f(control_fd >= 0, "couldn't open the guc log control file\n");
+	assert(control_fd >= 0);
 
-	/*
-	 * i915 expects GuC log level to be specified as:
-	 * 0: disabled
-	 * 1: enabled (verbosity level 0 = min)
-	 * 2: enabled (verbosity level 1)
-	 * 3: enabled (verbosity level 2)
-	 * 4: enabled (verbosity level 3 = max)
-	 */
-	val = enable ? log_level + 1 : 0;
-
-	ret = snprintf(data, sizeof(data), "0x%" PRIx64, val);
-	igt_assert(ret > 2 && ret < sizeof(data));
+	ret = snprintf(data, sizeof(data), "%lu", verbosity);
+	assert(ret > 0);
 
 	ret = write(control_fd, data, ret);
-	igt_assert_f(ret > 0, "couldn't write to the log control file\n");
+	assert(ret > 0);
 
 	close(control_fd);
 }
@@ -110,14 +104,15 @@ static void int_sig_handler(int sig)
 	stop_logging = true;
 }
 
-static void pull_leftover_data(void)
+static ssize_t
+pull_leftover_data(struct guc_logger_thread_data *data, int log_fd)
 {
 	unsigned int bytes_read = 0;
 	int ret;
 
 	do {
 		/* Read the logs from relay buffer */
-		ret = read(relay_fd, read_buffer, SUBBUF_SIZE);
+		ret = read(log_fd, data->buffer, SUBBUF_SIZE);
 		if (!ret)
 			break;
 
@@ -126,49 +121,49 @@ static void pull_leftover_data(void)
 
 		bytes_read += ret;
 
-		if (outfile_fd >= 0) {
-			ret = write(outfile_fd, read_buffer, SUBBUF_SIZE);
+		if (data->out_fd >= 0) {
+			ret = write(data->out_fd, data->buffer, SUBBUF_SIZE);
 			igt_assert_f(ret == SUBBUF_SIZE, "couldn't dump the logs in a file\n");
-			total_bytes_written += ret;
 		}
 	} while(1);
 
-	igt_debug("%u bytes flushed\n", bytes_read);
+	return bytes_read;
 }
 
-static int num_filled_bufs(void)
+static int num_filled_bufs(struct guc_logger_thread_data *data)
 {
-	return (produced - consumed);
+	return (data->produced - data->consumed);
 }
 
-static void pull_data(void)
+static ssize_t pull_data(struct guc_logger_thread_data *data, int log_fd)
 {
 	char *ptr;
 	int ret;
 
-	pthread_mutex_lock(&mutex);
-	while (num_filled_bufs() >= NUM_SUBBUFS) {
-		igt_debug("overflow, will wait, produced %u, consumed %u\n", produced, consumed);
+	pthread_mutex_lock(&data->mutex);
+	while (num_filled_bufs(data) >= NUM_SUBBUFS) {
+		igt_debug("overflow, will wait, produced %u, consumed %u\n",
+			  data->produced, data->consumed);
 		/* Stall the main thread in case of overflow, as there are no
 		 * buffers available to store the new logs, otherwise there
 		 * could be corruption if both threads work on the same buffer.
 		 */
-		pthread_cond_wait(&overflow_cond, &mutex);
+		pthread_cond_wait(&data->overflow_cond, &data->mutex);
 	};
-	pthread_mutex_unlock(&mutex);
+	pthread_mutex_unlock(&data->mutex);
 
-	ptr = read_buffer + (produced % NUM_SUBBUFS) * SUBBUF_SIZE;
+	ptr = (char*)data->buffer + (data->produced % NUM_SUBBUFS) * SUBBUF_SIZE;
 
 	/* Read the logs from relay buffer */
-	ret = read(relay_fd, ptr, SUBBUF_SIZE);
+	ret = read(log_fd, ptr, SUBBUF_SIZE);
 	igt_assert_f(ret >= 0, "failed to read from the guc log file\n");
 	igt_assert_f(!ret || ret == SUBBUF_SIZE, "invalid read from relay file\n");
 
 	if (ret) {
-		pthread_mutex_lock(&mutex);
-		produced++;
-		pthread_cond_signal(&underflow_cond);
-		pthread_mutex_unlock(&mutex);
+		pthread_mutex_lock(&data->mutex);
+		data->produced++;
+		pthread_cond_signal(&data->underflow_cond);
+		pthread_mutex_unlock(&data->mutex);
 	} else {
 		/* Occasionally (very rare) read from the relay file returns no
 		 * data, albeit the polling done prior to read call indicated
@@ -176,61 +171,65 @@ static void pull_data(void)
 		 */
 		igt_debug("no data read from the relay file\n");
 	}
+
+	return ret;
 }
 
 static void *flusher(void *arg)
 {
+	struct guc_logger_thread_data *data = arg;
 	char *ptr;
 	int ret;
 
 	igt_debug("execution started of flusher thread\n");
 
 	do {
-		pthread_mutex_lock(&mutex);
-		while (!num_filled_bufs()) {
+		pthread_mutex_lock(&data->mutex);
+		while (!num_filled_bufs(data)) {
 			/* Exit only after completing the flush of all the filled
 			 * buffers as User would expect that all logs captured up
 			 * till the point of interruption/exit are written out to
 			 * the disk file.
 			 */
-			if (capturing_stopped) {
+			if (stop_logging) {
 				igt_debug("flusher to exit now\n");
-				pthread_mutex_unlock(&mutex);
+				pthread_mutex_unlock(&data->mutex);
 				return NULL;
 			}
-			pthread_cond_wait(&underflow_cond, &mutex);
+			pthread_cond_wait(&data->underflow_cond, &data->mutex);
 		};
-		pthread_mutex_unlock(&mutex);
+		pthread_mutex_unlock(&data->mutex);
 
-		ptr = read_buffer + (consumed % NUM_SUBBUFS) * SUBBUF_SIZE;
+		ptr = (char*)data->buffer + (data->consumed % NUM_SUBBUFS) * SUBBUF_SIZE;
 
-		ret = write(outfile_fd, ptr, SUBBUF_SIZE);
+		ret = write(data->out_fd, ptr, SUBBUF_SIZE);
 		igt_assert_f(ret == SUBBUF_SIZE, "couldn't dump the logs in a file\n");
 
-		total_bytes_written += ret;
-		if (max_filesize && (total_bytes_written > MB(max_filesize))) {
-			igt_debug("reached the target of %" PRIu64 " bytes\n", MB(max_filesize));
-			stop_logging = true;
-		}
-
-		pthread_mutex_lock(&mutex);
-		consumed++;
-		pthread_cond_signal(&overflow_cond);
-		pthread_mutex_unlock(&mutex);
+		pthread_mutex_lock(&data->mutex);
+		data->consumed++;
+		pthread_cond_signal(&data->overflow_cond);
+		pthread_mutex_unlock(&data->mutex);
 	} while(1);
 
 	return NULL;
 }
 
-static void init_flusher_thread(void)
+static void init_flusher_data(struct guc_logger_thread_data *data,
+			      int out_fd, void *buffer)
+{
+	pthread_cond_init(&data->underflow_cond, NULL);
+	pthread_cond_init(&data->overflow_cond, NULL);
+	pthread_mutex_init(&data->mutex, NULL);
+	data->out_fd = out_fd;
+	data->buffer = buffer;
+}
+
+static void init_flusher_thread(pthread_t *flush_thread,
+				struct guc_logger_thread_data *data)
 {
 	struct sched_param	thread_sched;
 	pthread_attr_t		p_attr;
 	int ret;
-
-	pthread_cond_init(&underflow_cond, NULL);
-	pthread_cond_init(&overflow_cond, NULL);
-	pthread_mutex_init(&mutex, NULL);
 
 	ret = pthread_attr_init(&p_attr);
 	igt_assert_f(ret == 0, "error obtaining default thread attributes\n");
@@ -249,38 +248,16 @@ static void init_flusher_thread(void)
 	ret = pthread_attr_setschedparam(&p_attr, &thread_sched);
 	igt_assert_f(ret == 0, "couldn't set thread priority\n");
 
-	ret = pthread_create(&flush_thread, &p_attr, flusher, NULL);
+	ret = pthread_create(flush_thread, &p_attr, flusher, data);
 	igt_assert_f(ret == 0, "thread creation failed\n");
 
 	ret = pthread_attr_destroy(&p_attr);
 	igt_assert_f(ret == 0, "error destroying thread attributes\n");
 }
 
-static void open_relay_file(void)
-{
-	relay_fd = igt_debugfs_open(-1, RELAY_FILE_NAME, O_RDONLY);
-	igt_assert_f(relay_fd >= 0, "couldn't open the guc log file\n");
-}
-
-static void open_output_file(void)
-{
-	/* Use Direct IO mode for the output file, as the data written is not
-	 * supposed to be accessed again, this saves a copy of data from App's
-	 * buffer to kernel buffer (Page cache). Due to no buffering on kernel
-	 * side, data is flushed out to disk faster and more buffering can be
-	 * done on the logger side to hide the disk IO latency.
-	 */
-	outfile_fd = open(out_filename ? : DEFAULT_OUTPUT_FILE_NAME,
-			  O_CREAT | O_WRONLY | O_TRUNC | O_DIRECT,
-			  0440);
-	igt_assert_f(outfile_fd >= 0, "couldn't open the output file\n");
-
-	free(out_filename);
-}
-
 static void init_main_thread(void)
 {
-	struct sched_param	thread_sched;
+	struct sched_param thread_sched;
 	int ret;
 
 	/* Run the main thread at highest priority to ensure that it always
@@ -291,6 +268,112 @@ static void init_main_thread(void)
 	thread_sched.sched_priority = 1;
 	ret = sched_setscheduler(getpid(), SCHED_FIFO, &thread_sched);
 	igt_assert_f(ret == 0, "couldn't set the priority\n");
+}
+
+static void print_usage(FILE *out, char **argv)
+{
+	const char *help =
+		"  -v --verbosity=level   verbosity level of GuC logging\n"
+		"  -o --outputfile=name   name of the output file, including the location, where logs will be stored\n"
+		"  -t --testduration=sec  max duration in seconds for which the logger should run\n"
+		"  -s --size=MB           max size of output file in MBs after which logging will be stopped\n";
+
+	fprintf(out, "Usage: %s [OPTIONS]\n", argv[0]);
+	fprintf(out, "%s", help);
+}
+
+static void
+process_command_line(int argc, char **argv, struct guc_logger_options *opts)
+{
+	static struct option long_options[] = {
+		{"verbosity", required_argument, 0, 'v'},
+		{"outputfile", required_argument, 0, 'o'},
+		{"testduration", required_argument, 0, 't'},
+		{"size", required_argument, 0, 's'},
+		{"help", no_argument, 0, 'h'},
+		{ 0, 0, 0, 0 }
+	};
+
+	int option_index = 0;
+	int c;
+	opts->verbosity = -1;
+
+	while ((c = getopt_long(argc, argv, "v:o:t:s:h",
+				long_options, &option_index)) != -1) {
+		switch (c) {
+		case 'v':
+			opts->verbosity = atoi(optarg);
+			if (opts->verbosity < 0 || opts->verbosity > 4) {
+				fprintf(stderr, "invalid input for -v option\n");
+				goto out;
+			}
+			break;
+		case 'o':
+			opts->out_filename = strdup(optarg);
+			if (!opts->out_filename) {
+				fprintf(stderr, "Couldn't allocate the o/p filename\n");
+				goto out;
+			}
+			break;
+		case 't':
+			opts->test_duration = atoi(optarg);
+			if (opts->test_duration < 0) {
+				fprintf(stderr, "invalid input for -t option\n");
+				goto out;
+			}
+			break;
+		case 's':
+			opts->max_filesize = atoi(optarg);
+			if (opts->max_filesize < 0) {
+				fprintf(stderr, "invalid input for -s option\n");
+				goto out;
+			}
+			break;
+		case 'h':
+			print_usage(stdout, argv);
+			exit(EXIT_SUCCESS);
+		case '?':
+			fprintf(stderr, "Argument: %c expects a value\n\n", c);
+			goto out;
+		case ':':
+			fprintf(stderr, "Invalid argument: %c\n\n", c);
+			goto out;
+		default:
+			fprintf(stderr, "Error\n\n");
+			goto out;
+		}
+	}
+
+	return;
+
+out:
+	print_usage(stderr, argv);
+	exit(EXIT_FAILURE);
+}
+
+int main(int argc, char **argv)
+{
+	struct guc_logger_options opts = { 0 };
+	struct guc_logger_thread_data data = { 0 };
+	int out_fd;
+	void *buffer;
+	ssize_t total_bytes = 0;
+	struct pollfd log_poll_fd;
+	pthread_t flush_thread;
+	int nfds;
+	int log_fd;
+	int ret;
+
+	process_command_line(argc, argv, &opts);
+
+	/* Use full verbosity by default */
+	if (opts.verbosity == -1)
+		opts.verbosity = 4;
+
+	out_fd = open(opts.out_filename ? : DEFAULT_OUTPUT_FILE_NAME,
+		      O_CREAT | O_WRONLY | O_TRUNC | O_DIRECT, 0440);
+	assert(out_fd >= 0);
+	free(opts.out_filename);
 
 	if (signal(SIGINT, int_sig_handler) == SIG_ERR)
 		igt_assert_f(0, "SIGINT handler registration failed\n");
@@ -299,81 +382,13 @@ static void init_main_thread(void)
 		igt_assert_f(0, "SIGALRM handler registration failed\n");
 
 	/* Need an aligned pointer for direct IO */
-	ret = posix_memalign((void **)&read_buffer, PAGE_SIZE, NUM_SUBBUFS * SUBBUF_SIZE);
+	ret = posix_memalign((void **)&buffer, PAGE_SIZE,
+			     NUM_SUBBUFS * SUBBUF_SIZE);
 	igt_assert_f(ret == 0, "couldn't allocate the read buffer\n");
 
 	/* Keep the pages locked in RAM, avoid page fault overhead */
-	ret = mlock(read_buffer, NUM_SUBBUFS * SUBBUF_SIZE);
+	ret = mlock(buffer, NUM_SUBBUFS * SUBBUF_SIZE);
 	igt_assert_f(ret == 0, "failed to lock memory\n");
-
-	/* Enable the logging, it may not have been enabled from boot and so
-	 * the relay file also wouldn't have been created.
-	 */
-	guc_log_control(true, verbosity_level);
-
-	open_relay_file();
-	open_output_file();
-}
-
-static int parse_options(int opt, int opt_index, void *data)
-{
-	igt_debug("opt %c optarg %s\n", opt, optarg);
-
-	switch(opt) {
-	case 'v':
-		verbosity_level = atoi(optarg);
-		igt_assert_f(verbosity_level >= 0 && verbosity_level <= 3, "invalid input for -v option\n");
-		igt_debug("verbosity level to be used is %d\n", verbosity_level);
-		break;
-	case 'o':
-		out_filename = strdup(optarg);
-		igt_assert_f(out_filename, "Couldn't allocate the o/p filename\n");
-		igt_debug("logs to be stored in file %s\n", out_filename);
-		break;
-	case 't':
-		test_duration = atoi(optarg);
-		igt_assert_f(test_duration > 0, "invalid input for -t option\n");
-		igt_debug("logger to run for %d second\n", test_duration);
-		break;
-	case 's':
-		max_filesize = atoi(optarg);
-		igt_assert_f(max_filesize > 0, "invalid input for -s option\n");
-		igt_debug("max allowed size of the output file is %d MB\n", max_filesize);
-		break;
-	}
-
-	return 0;
-}
-
-static void process_command_line(int argc, char **argv)
-{
-	static struct option long_options[] = {
-		{"verbosity", required_argument, 0, 'v'},
-		{"outputfile", required_argument, 0, 'o'},
-		{"testduration", required_argument, 0, 't'},
-		{"size", required_argument, 0, 's'},
-		{ 0, 0, 0, 0 }
-	};
-
-	const char *help =
-		"  -v --verbosity=level   verbosity level of GuC logging (0-3)\n"
-		"  -o --outputfile=name   name of the output file, including the location, where logs will be stored\n"
-		"  -t --testduration=sec  max duration in seconds for which the logger should run\n"
-		"  -s --size=MB           max size of output file in MBs after which logging will be stopped\n";
-
-	igt_simple_init_parse_opts(&argc, argv, "v:o:t:s:", long_options,
-				   help, parse_options, NULL);
-}
-
-int main(int argc, char **argv)
-{
-	struct pollfd relay_poll_fd;
-	int nfds;
-	int ret;
-
-	process_command_line(argc, argv);
-
-	init_main_thread();
 
 	/* Use a separate thread for flushing the logs to a file on disk.
 	 * Main thread will buffer the data from relay file in its pool of
@@ -383,40 +398,45 @@ int main(int argc, char **argv)
 	 * (/proc/sys/vm/dirty_ratio), kernel starts blocking the processes
 	 * doing the file writes.
 	 */
-	init_flusher_thread();
+	init_flusher_data(&data, out_fd, buffer);
+	init_flusher_thread(&flush_thread, &data);
+	init_main_thread();
 
-	relay_poll_fd.fd = relay_fd;
-	relay_poll_fd.events = POLLIN;
-	relay_poll_fd.revents = 0;
+	guc_log_control(opts.verbosity);
+	log_fd = igt_debugfs_open(-1, LOG_FILE_NAME, O_RDONLY);
+	assert(log_fd >= 0);
 
+	memset(&log_poll_fd, 0, sizeof(log_poll_fd));
+	log_poll_fd.fd = log_fd;
+	log_poll_fd.events = POLLIN;
 	nfds = 1; /* only one fd to poll */
 
-	alarm(test_duration); /* Start the alarm */
+	alarm(opts.test_duration); /* Start the alarm */
 
 	do {
-		ret = poll(&relay_poll_fd, nfds, -1);
+		ret = poll(&log_poll_fd, nfds, -1);
 		if (ret < 0) {
 			if (errno == EINTR)
 				break;
 			igt_assert_f(0, "poll call failed\n");
 		}
 
-		pull_data();
+		total_bytes += pull_data(&data, log_fd);
+		if (opts.max_filesize && (total_bytes > MB(opts.max_filesize))) {
+			igt_debug("reached the target of %lu bytes\n", MB(opts.max_filesize));
+			stop_logging = true;
+		}
 	} while (!stop_logging);
 
 	/* Pause logging on the GuC side */
-	guc_log_control(false, 0);
+	guc_log_control(0);
 
-	/* Signal flusher thread to make an exit */
-	capturing_stopped = 1;
-	pthread_cond_signal(&underflow_cond);
+	pthread_cond_signal(&data.underflow_cond);
 	pthread_join(flush_thread, NULL);
 
-	pull_leftover_data();
-	igt_info("total bytes written %" PRIu64 "\n", total_bytes_written);
+	total_bytes += pull_leftover_data(&data, log_fd);
+	igt_info("total bytes written %lu\n", total_bytes);
 
-	free(read_buffer);
-	close(relay_fd);
-	close(outfile_fd);
-	igt_exit();
+	close(log_fd);
+	close(out_fd);
 }
