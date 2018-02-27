@@ -67,7 +67,6 @@ pthread_t flush_thread;
 int verbosity_level = 3; /* by default capture logs at max verbosity */
 uint32_t produced, consumed;
 uint64_t total_bytes_written;
-int num_buffers = NUM_SUBBUFS;
 int relay_fd, outfile_fd = -1;
 uint32_t test_duration, max_filesize;
 pthread_cond_t underflow_cond, overflow_cond;
@@ -148,7 +147,7 @@ static void pull_data(void)
 	int ret;
 
 	pthread_mutex_lock(&mutex);
-	while (num_filled_bufs() >= num_buffers) {
+	while (num_filled_bufs() >= NUM_SUBBUFS) {
 		igt_debug("overflow, will wait, produced %u, consumed %u\n", produced, consumed);
 		/* Stall the main thread in case of overflow, as there are no
 		 * buffers available to store the new logs, otherwise there
@@ -158,7 +157,7 @@ static void pull_data(void)
 	};
 	pthread_mutex_unlock(&mutex);
 
-	ptr = read_buffer + (produced % num_buffers) * SUBBUF_SIZE;
+	ptr = read_buffer + (produced % NUM_SUBBUFS) * SUBBUF_SIZE;
 
 	/* Read the logs from relay buffer */
 	ret = read(relay_fd, ptr, SUBBUF_SIZE);
@@ -203,7 +202,7 @@ static void *flusher(void *arg)
 		};
 		pthread_mutex_unlock(&mutex);
 
-		ptr = read_buffer + (consumed % num_buffers) * SUBBUF_SIZE;
+		ptr = read_buffer + (consumed % NUM_SUBBUFS) * SUBBUF_SIZE;
 
 		ret = write(outfile_fd, ptr, SUBBUF_SIZE);
 		igt_assert_f(ret == SUBBUF_SIZE, "couldn't dump the logs in a file\n");
@@ -310,11 +309,11 @@ static void init_main_thread(void)
 		igt_assert_f(0, "SIGALRM handler registration failed\n");
 
 	/* Need an aligned pointer for direct IO */
-	ret = posix_memalign((void **)&read_buffer, PAGE_SIZE, num_buffers * SUBBUF_SIZE);
+	ret = posix_memalign((void **)&read_buffer, PAGE_SIZE, NUM_SUBBUFS * SUBBUF_SIZE);
 	igt_assert_f(ret == 0, "couldn't allocate the read buffer\n");
 
 	/* Keep the pages locked in RAM, avoid page fault overhead */
-	ret = mlock(read_buffer, num_buffers * SUBBUF_SIZE);
+	ret = mlock(read_buffer, NUM_SUBBUFS * SUBBUF_SIZE);
 	igt_assert_f(ret == 0, "failed to lock memory\n");
 
 	/* Enable the logging, it may not have been enabled from boot and so
@@ -341,11 +340,6 @@ static int parse_options(int opt, int opt_index, void *data)
 		igt_assert_f(out_filename, "Couldn't allocate the o/p filename\n");
 		igt_debug("logs to be stored in file %s\n", out_filename);
 		break;
-	case 'b':
-		num_buffers = atoi(optarg);
-		igt_assert_f(num_buffers > 0, "invalid input for -b option\n");
-		igt_debug("number of buffers to be used is %d\n", num_buffers);
-		break;
 	case 't':
 		test_duration = atoi(optarg);
 		igt_assert_f(test_duration > 0, "invalid input for -t option\n");
@@ -370,7 +364,6 @@ static void process_command_line(int argc, char **argv)
 	static struct option long_options[] = {
 		{"verbosity", required_argument, 0, 'v'},
 		{"outputfile", required_argument, 0, 'o'},
-		{"buffers", required_argument, 0, 'b'},
 		{"testduration", required_argument, 0, 't'},
 		{"size", required_argument, 0, 's'},
 		{"discard", no_argument, 0, 'd'},
@@ -380,12 +373,11 @@ static void process_command_line(int argc, char **argv)
 	const char *help =
 		"  -v --verbosity=level   verbosity level of GuC logging (0-3)\n"
 		"  -o --outputfile=name   name of the output file, including the location, where logs will be stored\n"
-		"  -b --buffers=num       number of buffers to be maintained on logger side for storing logs\n"
 		"  -t --testduration=sec  max duration in seconds for which the logger should run\n"
 		"  -s --size=MB           max size of output file in MBs after which logging will be stopped\n"
 		"  -d --discard           discard the old/boot-time logs before entering into the capture loop\n";
 
-	igt_simple_init_parse_opts(&argc, argv, "v:o:b:t:s:d", long_options,
+	igt_simple_init_parse_opts(&argc, argv, "v:o:t:s:d", long_options,
 				   help, parse_options, NULL);
 }
 
