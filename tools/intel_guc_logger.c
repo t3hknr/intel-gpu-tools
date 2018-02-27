@@ -70,7 +70,7 @@ uint64_t total_bytes_written;
 int relay_fd, outfile_fd = -1;
 uint32_t test_duration, max_filesize;
 pthread_cond_t underflow_cond, overflow_cond;
-bool stop_logging, discard_oldlogs, capturing_stopped;
+bool stop_logging, capturing_stopped;
 
 static void guc_log_control(bool enable, uint32_t log_level)
 {
@@ -260,16 +260,6 @@ static void open_relay_file(void)
 {
 	relay_fd = igt_debugfs_open(-1, RELAY_FILE_NAME, O_RDONLY);
 	igt_assert_f(relay_fd >= 0, "couldn't open the guc log file\n");
-
-	/* Purge the old/boot-time logs from the relay buffer.
-	 * This is more for Val team's requirement, where they have to first
-	 * purge the existing logs before starting the tests for which the logs
-	 * are actually needed. After this logger will enter into a loop and
-	 * wait for the new data, at that point benchmark can be launched from
-	 * a different shell.
-	 */
-	if (discard_oldlogs)
-		pull_leftover_data();
 }
 
 static void open_output_file(void)
@@ -350,10 +340,6 @@ static int parse_options(int opt, int opt_index, void *data)
 		igt_assert_f(max_filesize > 0, "invalid input for -s option\n");
 		igt_debug("max allowed size of the output file is %d MB\n", max_filesize);
 		break;
-	case 'd':
-		discard_oldlogs = true;
-		igt_debug("old/boot-time logs will be discarded\n");
-		break;
 	}
 
 	return 0;
@@ -366,7 +352,6 @@ static void process_command_line(int argc, char **argv)
 		{"outputfile", required_argument, 0, 'o'},
 		{"testduration", required_argument, 0, 't'},
 		{"size", required_argument, 0, 's'},
-		{"discard", no_argument, 0, 'd'},
 		{ 0, 0, 0, 0 }
 	};
 
@@ -374,10 +359,9 @@ static void process_command_line(int argc, char **argv)
 		"  -v --verbosity=level   verbosity level of GuC logging (0-3)\n"
 		"  -o --outputfile=name   name of the output file, including the location, where logs will be stored\n"
 		"  -t --testduration=sec  max duration in seconds for which the logger should run\n"
-		"  -s --size=MB           max size of output file in MBs after which logging will be stopped\n"
-		"  -d --discard           discard the old/boot-time logs before entering into the capture loop\n";
+		"  -s --size=MB           max size of output file in MBs after which logging will be stopped\n";
 
-	igt_simple_init_parse_opts(&argc, argv, "v:o:t:s:d", long_options,
+	igt_simple_init_parse_opts(&argc, argv, "v:o:t:s:", long_options,
 				   help, parse_options, NULL);
 }
 
