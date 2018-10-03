@@ -242,13 +242,24 @@ err:
 	return -1;
 }
 
-static int __search_and_open(const char *base, int offset, unsigned int chipset)
+static int
+__search_and_open(unsigned int chipset, unsigned int flags)
 {
+	const char *base = "/dev/dri";
+	DIR *d = opendir(base);
+	struct dirent *e;
+	
+	if (!d)
+		return -errno;
+
+	while (e = readdir(d)) {
+	}
+
 	for (int i = 0; i < 16; i++) {
 		char name[80];
 		int fd;
 
-		sprintf(name, "%s%u", base, i + offset);
+		sprintf(name, "%s/%s", base, e->d_name);
 		fd = open_device(name, chipset);
 		if (fd != -1)
 			return fd;
@@ -257,13 +268,14 @@ static int __search_and_open(const char *base, int offset, unsigned int chipset)
 	return -1;
 }
 
-static int __open_driver(const char *base, int offset, unsigned int chipset)
+static int
+__open_driver(unsigned int chipset, unsigned int flags)
 {
 	static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 	int fd;
 
-	fd = __search_and_open(base, offset, chipset);
-	if (fd != -1)
+	fd = __search_and_open(chipset, flags);
+	if (fd >= 0)
 		return fd;
 
 	pthread_mutex_lock(&mutex);
@@ -277,7 +289,7 @@ static int __open_driver(const char *base, int offset, unsigned int chipset)
 	}
 	pthread_mutex_unlock(&mutex);
 
-	return __search_and_open(base, offset, chipset);
+	return __search_and_open(base, type, chipset);
 }
 
 /**
@@ -287,16 +299,16 @@ static int __open_driver(const char *base, int offset, unsigned int chipset)
  * Open the first DRM device we can find, searching up to 16 device nodes
  *
  * Returns:
- * An open DRM fd or -1 on error
+ * An open DRM fd or negative errno on error
  */
 int __drm_open_driver(int chipset)
 {
-	return __open_driver("/dev/dri/card", 0, chipset);
+	return __open_driver(chipset, NODE_LEGACY);
 }
 
 static int __drm_open_driver_render(int chipset)
 {
-	return __open_driver("/dev/dri/renderD", 128, chipset);
+	return __open_driver(chipset, NODE_RENDER);
 }
 
 static int at_exit_drm_fd = -1;

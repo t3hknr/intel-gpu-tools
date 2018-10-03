@@ -43,6 +43,10 @@
 #define DRIVER_VGEM	(1 << 2)
 #define DRIVER_VIRTIO	(1 << 3)
 #define DRIVER_AMDGPU	(1 << 4)
+
+#define NODE_LEGACY	(1 << 0)
+#define NODE_RENDER	(1 << 1)
+#define NODE_ANY	(NODE_LEGACY | NODE_RENDER)
 /*
  * Exclude DRVER_VGEM from DRIVER_ANY since if you run on a system
  * with vgem as well as a supported driver, you can end up with a
@@ -73,6 +77,14 @@ int drm_open_driver(int chipset);
 int drm_open_driver_master(int chipset);
 int drm_open_driver_render(int chipset);
 int __drm_open_driver(int chipset);
+
+int drm_open_driver_idx(int chipset, unsigned int index);
+int drm_open_driver_master_idx(int chipset, unsigned int index);
+int drm_open_driver_render_idx(int chipset, unsigned int index);
+int __drm_open_driver_idx(int chipset, unsigned int index);
+
+int drm_open_device(int num);
+int __drm_open_device(int num);
 
 void gem_quiescent_gpu(int fd);
 
